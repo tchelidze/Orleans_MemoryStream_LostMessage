@@ -18,8 +18,9 @@ builder.UseOrleans(static siloBuilder =>
         {
             cacheEvictionOptions.Configure(options =>
             {
-                options.DataMaxAgeInCache = TimeSpan.FromSeconds(20);
-                options.DataMinTimeInCache = TimeSpan.FromSeconds(20);
+                options.DataMaxAgeInCache = TimeSpan.FromSeconds(1);
+                options.DataMinTimeInCache = TimeSpan.FromSeconds(1);
+                options.MetadataMinTimeInCache = TimeSpan.FromSeconds(22);
             });
         });
 
@@ -27,7 +28,7 @@ builder.UseOrleans(static siloBuilder =>
         {
             pullingAgentOptions.Configure(opt =>
             {
-                opt.StreamInactivityPeriod = TimeSpan.FromMinutes(1);
+                opt.StreamInactivityPeriod = TimeSpan.FromSeconds(10);
             });
         });
     });
@@ -40,10 +41,30 @@ var consumerGrain = host.Services.GetRequiredService<IGrainFactory>().GetGrain<I
 await consumerGrain.Subscribe();
 
 var producerGrain = host.Services.GetRequiredService<IGrainFactory>().GetGrain<IEventProducerTestGrain>(Guid.Empty);
-await producerGrain.Produce(1);
 
-// Wait >1 minute to make stream inactive
-await Task.Delay(TimeSpan.FromSeconds(80));
+var totalMessage = 16 * 1024 + 10;
+for (var i = 0; i < totalMessage; i++)
+{
+    await producerGrain.Produce(1);
+}
+
+while (true)
+{
+    var consumedMessageCount = await consumerGrain.GetConsumedMessageCount();
+    if (consumedMessageCount == totalMessage)
+    {
+        break;
+    }
+
+    Console.WriteLine($"----- Consumed {consumedMessageCount} waiting 2 sec --------");
+    await Task.Delay(TimeSpan.FromSeconds(2));
+}
+
+await consumerGrain.SetEnabledLogging(true);
+
+await Task.Delay(TimeSpan.FromMinutes(5));
+
+Console.WriteLine("-----messages produces --------");
 
 await producerGrain.Produce(2);
 await producerGrain.Produce(3);
@@ -78,17 +99,21 @@ public sealed class EventProducerTestGrain : Grain, IEventProducerTestGrain
 public interface IConsumerGrain : IGrainWithGuidKey
 {
     Task Subscribe();
+
+    Task<int> GetConsumedMessageCount();
+
+    Task SetEnabledLogging(bool enableLogging);
 }
 
-public class ConsumerGrain : Grain, IConsumerGrain
+public class ConsumerGrain : Grain, IConsumerGrain, IAsyncObserver<int>
 {
-    private readonly LoggerObserver _observer;
     private readonly IClusterClient _clusterClient;
+    private int _consumedMessageCount;
+    private bool _enableLogging;
 
     public ConsumerGrain(IClusterClient clusterClient)
     {
         _clusterClient = clusterClient;
-        _observer = new LoggerObserver();
     }
 
     public async Task Subscribe()
@@ -96,25 +121,38 @@ public class ConsumerGrain : Grain, IConsumerGrain
         var streamProvider = _clusterClient.GetStreamProvider(Constants.StreamProviderName);
         var streamId = StreamId.Create(Constants.NamespaceName, Guid.Empty);
         var stream = streamProvider.GetStream<int>(streamId);
-        await stream.SubscribeAsync(_observer);
+        await stream.SubscribeAsync(this);
     }
 
-    /// <summary>
-    /// Class that will log streaming events
-    /// </summary>
-    private class LoggerObserver : IAsyncObserver<int>
+    public Task SetEnabledLogging(bool enableLogging)
     {
-        public Task OnCompletedAsync() => Task.CompletedTask;
+        _enableLogging = enableLogging;
+        return Task.CompletedTask;
+    }
 
-        public Task OnErrorAsync(Exception ex) => Task.CompletedTask;
+    public Task<int> GetConsumedMessageCount()
+    {
+        return Task.FromResult(_consumedMessageCount);
+    }
 
-        public Task OnNextAsync(int item, StreamSequenceToken? token = null)
+    Task IAsyncObserver<int>.OnCompletedAsync() => Task.CompletedTask;
+
+    Task IAsyncObserver<int>.OnErrorAsync(Exception ex)
+    {
+        Console.WriteLine($"OnErrorAsync: {ex}");
+        return Task.CompletedTask;
+    }
+
+    Task IAsyncObserver<int>.OnNextAsync(int item, StreamSequenceToken? token = null)
+    {
+        Interlocked.Increment(ref _consumedMessageCount);
+        if (_enableLogging)
         {
             Console.WriteLine($"OnNextAsync: Item: {item}, Token = {token}");
-            return Task.CompletedTask;
         }
-    }
 
+        return Task.CompletedTask;
+    }
 }
 
 public static class Constants
