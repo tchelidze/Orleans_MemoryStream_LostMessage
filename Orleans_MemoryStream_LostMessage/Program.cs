@@ -2,7 +2,6 @@
 
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Orleans.Runtime;
 using Orleans.Streams;
 
 
@@ -62,16 +61,19 @@ while (true)
 
 await consumerGrain.SetEnabledLogging(true);
 
+Console.WriteLine("----- Waiting for 5 minutes --------");
+
 await Task.Delay(TimeSpan.FromMinutes(5));
 
-Console.WriteLine("-----messages produces --------");
-
 await producerGrain.Produce(2);
+Console.WriteLine("----- message 2 produced --------");
+
 await producerGrain.Produce(3);
+Console.WriteLine("----- message 2 produced --------");
 
 // Observe the console. Message 2 is lost.
 
-Console.ReadKey();
+await Task.Delay(TimeSpan.MaxValue);
 
 public interface IEventProducerTestGrain : IGrainWithGuidKey
 {
